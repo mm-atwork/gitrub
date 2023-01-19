@@ -7,14 +7,15 @@ import requests
 from datetime import datetime, timezone
 
 parser = argparse.ArgumentParser()
-# parser.add_argument("namehas", help="Name of the repo to search for (accepts wildcards)")
-parser.add_argument("-r", "--repo", help="Repo name, ie: docker-local")
+parser.add_argument("-r", "--repo", help="Search for a specific repo name, list all repos if unset")
 parser.add_argument("-t", "--github-token", help="Github token for auth")
 parser.add_argument("-o", "--organization", help="User organization to elaborate")
 parser.add_argument("--delete", help="Backup and delete a repository - Basically clone and zip locally, then delete on GitHub")
-parser.add_argument("-q", "--quiet", help="Don't print out the directory structure.", action="store_true", default=False)
+# parser.add_argument("-q", "--quiet", help="Don't print out the directory structure.", action="store_true", default=False)
 
 args = parser.parse_args()
+
+# To do: upload to S3 once archived
 
 def main():
 
@@ -107,69 +108,6 @@ def main():
     # while 'next' in res.links.keys():
       # res=requests.get(res.links['next']['url'],headers={"Authorization": git_token})
       # repos.extend(res.json())
-
-
-
-
-    exit()
-    
-    artifact = Artifactory(url=artifact_url, auth=('matteo.migliaccio', 'AKCp8igqzbMzHEiiYF8ADVARTqA2EFct5hzJs5XswFyjLSGLVaJkBKW7HXvM767NiXjByixuR'))
-
-    if args.delete:
-        artifact.artifacts.delete(args.delete)
-        print(args.delete + " deleted")
-        exit()
-
-    repositories = artifact.repositories.list()
-
-    for repo in repositories:
-
-        if args.path:
-            if repo.key != args.path:
-                continue
-        
-        repo_info = artifact.repositories.get_repo(repo.key)
-        
-        if repo_info.rclass == "local":
-
-            # Docker management
-            if repo_info.packageType == args.type:
-                # if repo_info.key == "docker-local":
-                r = requests.get("https://" + af_user + ":" + af_pass + "@artifactory.buildtest.eng.geospock.com/artifactory/api/storage/" + repo_info.key).json()
-                repo_lastupdate = (r['lastUpdated'])
-                t = datetime.datetime.strptime(repo_lastupdate, '%Y-%m-%dT%H:%M:%S.%fZ')
-
-                repo_children = (r['children'])
-
-                if not args.quiet:
-                    print(repo_info.key + " - " + t.strftime('%Y-%m-%d %H:%M') + " --------------------")
-                
-                for folder in repo_children:
-                    if folder['folder'] == True:
-
-                        if not args.quiet:
-                            print("    " + folder['uri'])
-                        
-                        sub_children = requests.get("https://" + af_user + ":" + af_pass + "@artifactory.buildtest.eng.geospock.com/artifactory/api/storage/" + repo_info.key + folder['uri']).json()['children']
-
-                        for sub_folder in sub_children:
-
-                            if sub_folder['folder'] == True:
-                                sub_info = artifact.artifacts.info(repo_info.key + "/" + folder['uri'] + "/" + sub_folder['uri'])
-                                sub_lastupdate = (sub_info.lastUpdated).strftime('%Y-%m-%d %H:%M')
-                                stale_repo_days = (datetime.datetime.now(datetime.timezone.utc) - sub_info.lastUpdated).days
-
-                                if stale_repo_days > 180:
-
-                                    if args.quiet:
-                                        print(repo_info.key + folder['uri'] + "/" + sub_folder['uri'] + " set to be deleted (last update " + sub_lastupdate + ")")
-
-                                    sub_lastupdate = sub_lastupdate + " (to be deleted)"
-                                    
-
-                                    
-                                if not args.quiet:
-                                    print("        " + sub_folder['uri'] + " - " + sub_lastupdate)
 
 
 if __name__ == '__main__': main()
