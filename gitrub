@@ -5,13 +5,14 @@ import argparse
 import json
 import requests
 from datetime import datetime, timezone
+from prettytable import PrettyTable
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-r", "--repo", help="Search for a specific repo name, list all repos if unset")
 parser.add_argument("-t", "--github-token", help="Github token for auth")
 parser.add_argument("-o", "--organization", help="User organization to elaborate")
 parser.add_argument("--delete", help="Backup and delete a repository - Basically clone and zip locally, then delete on GitHub")
-# parser.add_argument("-q", "--quiet", help="Don't print out the directory structure.", action="store_true", default=False)
+parser.add_argument("--contrib", help="List the single repo contributors along the contributions number.", action="store_true", default=False)
 
 args = parser.parse_args()
 
@@ -25,35 +26,43 @@ def main():
 
     if args.repo:
         api_url = api_baseurl + 'repos/' + args.organization + "/" + args.repo
-        print(api_url)
         repo = (requests.get(api_url, headers=headers)).json()
         
         if "message" in repo:
             if repo["message"] == "Not Found":
                 print("Repository not found, please check if it actually exists")
         else:
-              t = datetime.strptime(repo['updated_at'], '%Y-%m-%dT%H:%M:%SZ')
-              stale_repo_days = (datetime.now(timezone.utc) - t.replace(tzinfo=timezone.utc)).days
-              if stale_repo_days > 180:
-                  if repo['description']:
-                      repos.append(repo['full_name'] + ", " + repo['description'] + ", " + t.strftime('%Y-%m-%d %H:%M') + " --- STALE")
-                  else:
-                      repos.append(repo['full_name'] + ", " + t.strftime('%Y-%m-%d %H:%M') + " --- STALE")
-              else:
-                  if repo['description']:
-                      repos.append(repo['full_name'] + ", " + repo['description'] + ", " + t.strftime('%Y-%m-%d %H:%M'))
-                  else:
-                      repos.append(repo['full_name'] + ", " + t.strftime('%Y-%m-%d %H:%M'))
-        # 'https://api.github.com/repos/' + repo["full_name"]
-        # repo = (requests.get(repo["url"], headers=headers)).json()
-        # repos.append(repo['name'] + ", " + repo['updated_at'])
-    else:
+              repo['stale'] = "False"
+              last_update = get_last_update(repo)
+              stale_repo_days = (datetime.now(timezone.utc) - last_update.replace(tzinfo=timezone.utc)).days
+              if stale_repo_days > 365:
+                  repo['stale'] = "True"
 
-        # orgs_repos = (requests.get(api_baseurl + '/orgs/' + args.organization + '/repos?per_page=100', headers=headers)).json()
-        # repos = json.loads(orgs_repos)
-        
-        # for repo in orgs_repos:
-        #    print(repo['full_name'])
+              if not repo['description']:
+                  repo['description'] = ""
+              else:
+                  repo['description'] = (repo['description'][:50] + '..') if len(repo['description']) > 50 else repo['description']
+
+              # Show contributors to repo
+              # if args.contrib:
+                  # api_url = api_baseurl + 'repos/' + repo["full_name"] + '/contributors'
+                  # contrib = (requests.get(api_url, headers=headers)).json()
+
+                  # for contributor in contrib:
+                      # print(contributor['login'], contributor['contributions'])
+                      
+              if args.contrib:
+                  try:
+                      api_url = api_baseurl + 'repos/' + repo["full_name"] + '/contributors'
+                      contrib = (requests.get(api_url, headers=headers)).json()
+                      main_contributor = contrib[0]['login']
+                  except:
+                      main_contributor = "notfound"
+              else:
+                  main_contributor = ""
+              
+              repos.append(repo['name'] + '$' + repo['description'] + '$' + last_update.strftime('%Y-%m-%d %H:%M') + "$" + main_contributor + "$" + repo['stale'])
+    else:
             
         params = {'per_page':100}
         another_page = True
@@ -73,41 +82,51 @@ def main():
 
         for page in orgs_repos:
            for repo in page:
-              
-              t = datetime.strptime(repo['updated_at'], '%Y-%m-%dT%H:%M:%SZ')
-              stale_repo_days = (datetime.now(timezone.utc) - t.replace(tzinfo=timezone.utc)).days
 
-              if stale_repo_days > 1300:
-                  if repo['description']:
-                      repos.append(repo['full_name'] + ", " + repo['description'] + ", " + t.strftime('%Y-%m-%d %H:%M'))
-                  else:
-                      repos.append(repo['full_name'] + ", " + t.strftime('%Y-%m-%d %H:%M'))
+              last_update = get_last_update(repo)
+              stale_repo_days = (datetime.now(timezone.utc) - last_update.replace(tzinfo=timezone.utc)).days
+
+              repo['stale'] = "False"
+
+              if stale_repo_days > 365:
+                  repo['stale'] = "True"
+
+              if not repo['description']:
+                  repo['description'] = ""
+              else:
+                  repo['description'] = (repo['description'][:50] + '..') if len(repo['description']) > 50 else repo['description']
+
+              if args.contrib:
+                  try:
+                      api_url = api_baseurl + 'repos/' + repo["full_name"] + '/contributors'
+                      contrib = (requests.get(api_url, headers=headers)).json()
+                      # print(contrib[0]['login'])
+                      main_contributor = contrib[0]['login']
+                  except:
+                      main_contributor = "notfound"
+              else:
+                  main_contributor = ""
 
 
-                  # Show contributors to repo
-                  # api_url = api_baseurl + 'repos/' + repo["full_name"] + '/contributors'
-                  # contrib = (requests.get(api_url, headers=headers)).json()
+              repos.append(repo['name'] + '$' + repo['description'] + '$' + last_update.strftime('%Y-%m-%d %H:%M') + "$" + main_contributor + "$" + repo['stale'])
 
-                  # for contributor in contrib:
-                      # print(contributor['login'], contributor['contributions'])
-                  
-                  # exit()
-              
-          
+    arrHeaders = ["Repo", "Description", "LastPush", "MainContributor", "Stale"]
 
+    pt = PrettyTable(arrHeaders)
+    pt.align = "l"
 
     for repo_det in repos:
-        print(repo_det)
+        pt.add_row(repo_det.split("$"))
 
+    print(pt.get_string(sortby="LastPush"))
 
-    # https://api.github.com/repos/OWNER/REPO/zipball/REF
+def get_last_update(repo):
+    last_push = datetime.strptime(repo['pushed_at'], '%Y-%m-%dT%H:%M:%SZ')
+    last_commit = datetime.strptime(repo['updated_at'], '%Y-%m-%dT%H:%M:%SZ')
 
-    # url = "https://api.github.com/XXXX?simple=yes&per_page=100&page=1"
-    # res=requests.get(url,headers={"Authorization": git_token})
-    # repos=res.json()
-    # while 'next' in res.links.keys():
-      # res=requests.get(res.links['next']['url'],headers={"Authorization": git_token})
-      # repos.extend(res.json())
-
+    if last_push > last_commit:
+        return last_push
+    else:
+        return last_commit
 
 if __name__ == '__main__': main()
