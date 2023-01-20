@@ -1,18 +1,25 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
+# pylint: disable=bare-except, too-many-locals, line-too-long
+
+"""
+gitrub - fetches a list of repos (or a single repo) from github to maintain and clean
+"""
 
 import argparse
-import json
-import requests
 from datetime import datetime, timezone
+import json
+import os
+import sys
+import requests
 from prettytable import PrettyTable
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-r", "--repo", help="Search for a specific repo name, list all repos if unset")
-parser.add_argument("-t", "--github-token", help="Github token for auth")
+parser.add_argument("-t", "--github-token", help="Github token required for authentication, set this or the environmental variable GH_TOKEN")
 parser.add_argument("-o", "--organization", help="User organization to elaborate")
 parser.add_argument("--delete", help="Backup and delete a repository - Basically clone and zip locally, then delete on GitHub")
-parser.add_argument("--contrib", help="List the single repo contributors along the contributions number.", action="store_true", default=False)
+parser.add_argument("-d", "--days", help="Set the number of days after of which a repo is considered 'stale'. Required to check old repos, if unset it won't fetch the repos' top contributor.", type=int)
 
 args = parser.parse_args()
 
@@ -20,113 +27,192 @@ args = parser.parse_args()
 
 def main():
 
-    headers = {'Authorization': 'token ' + args.github_token}
+    """
+    Once authenticated to github, the script is fetching
+    a single repo or the full list of repos related one user
+    or its organization.
+    """
+
+    github_token = ""
+
+    if args.github_token:
+        github_token = args.github_token
+    else:
+        if os.environ.get('GH_TOKEN'):
+            github_token = os.getenv('GH_TOKEN')
+        else:
+            print("No -t/--github-token arguments passed or GH_TOKEN environment variable found. Please pass the GitHub token by setting the argument or the environment variable")
+            sys.exit(1)
+
+    headers = {
+        "Authorization": "token " + github_token,
+        "Accept": "application/vnd.github+json"
+    }
+
     api_baseurl = "https://api.github.com/"
+    
+    # Check Github API rates before continuing
+    rates = (requests.get(api_baseurl + "rate_limit", headers=headers, timeout=10)).json()
+    try:
+        remaining = rates["resources"]["core"]["remaining"]
+        reset = datetime.fromtimestamp(rates["resources"]["core"]["reset"]).strftime('%c')
+        if remaining < 20:
+            print(f"WARNING: only {str(remaining)} remaining API calls, will reset at {str(reset)}")
+        elif remaining == 0:
+            print(f"ERROR: no API calls last, will reset at {str(reset)}")
+            sys.exit(1)
+    except:
+        print("Error while checking current API call rates. Check your authentication is still valid")
+        sys.exit(1)
+
     repos = []
+    user = (requests.get(api_baseurl + "user", headers=headers, timeout=10)).json()["login"]
 
     if args.repo:
-        api_url = api_baseurl + 'repos/' + args.organization + "/" + args.repo
-        repo = (requests.get(api_url, headers=headers)).json()
-        
+
+        if args.organization:
+            api_url = api_baseurl + 'repos/' + args.organization + '/' + args.repo
+        else:
+            api_url = api_baseurl + 'repos/' + user + '/' + args.repo
+
+        repo = (requests.get(api_url, headers=headers, timeout=10)).json()
+
         if "message" in repo:
             if repo["message"] == "Not Found":
                 print("Repository not found, please check if it actually exists")
         else:
-              repo['stale'] = "False"
-              last_update = get_last_update(repo)
-              stale_repo_days = (datetime.now(timezone.utc) - last_update.replace(tzinfo=timezone.utc)).days
-              if stale_repo_days > 365:
-                  repo['stale'] = "True"
+            repo['stale'] = "False"
 
-              if not repo['description']:
-                  repo['description'] = ""
-              else:
-                  repo['description'] = (repo['description'][:50] + '..') if len(repo['description']) > 50 else repo['description']
+            last_update = get_last_update(repo)
+            updated = ""
+            repo['stale'] = "False"
+            if last_update:
+                if last_update[1] > args.days:
+                    repo['stale'] = "True"
+                updated = last_update[0]
+            else:
+                updated = "NotAvailable"
 
-              # Show contributors to repo
-              # if args.contrib:
-                  # api_url = api_baseurl + 'repos/' + repo["full_name"] + '/contributors'
-                  # contrib = (requests.get(api_url, headers=headers)).json()
+            if not repo['description']:
+                repo['description'] = ""
+            else:
+                repo['description'] = (repo['description'][:50] + '..') if len(repo['description']) > 50 else repo['description']
 
-                  # for contributor in contrib:
-                      # print(contributor['login'], contributor['contributions'])
-                      
-              if args.contrib:
-                  try:
-                      api_url = api_baseurl + 'repos/' + repo["full_name"] + '/contributors'
-                      contrib = (requests.get(api_url, headers=headers)).json()
-                      main_contributor = contrib[0]['login']
-                  except:
-                      main_contributor = "notfound"
-              else:
-                  main_contributor = ""
-              
-              repos.append(repo['name'] + '$' + repo['description'] + '$' + last_update.strftime('%Y-%m-%d %H:%M') + "$" + main_contributor + "$" + repo['stale'])
+            main_contributor = ""
+            if args.days:
+                main_contributor = get_contrib(repo, headers)
+
+            repos.append(repo['name'] + '$' + repo['description'] + '$' + updated + "$" + main_contributor + "$" + repo['stale'])
     else:
-            
-        params = {'per_page':100}
+
+        params = {'per_page' : 100}
         another_page = True
 
-        api_url = api_baseurl + 'orgs/' + args.organization + '/repos'
+        if args.organization:
+            api_url = api_baseurl + 'orgs/' + args.organization + '/repos'
+        else:
+            api_url = api_baseurl + 'user/repos'
+            params['type'] = "owner"
+
         orgs_repos = []
+
         while another_page:
-            r = requests.get(api_url, params=params, headers=headers)
-            json_response = json.loads(r.text)
+            github_response = requests.get(api_url, params=params, headers=headers, timeout=10)
+            json_response = json.loads(github_response.text)
             orgs_repos.append(json_response)
 
-            if 'next' in r.links:
-                api_url = r.links['next']['url']
+            if 'next' in github_response.links:
+                api_url = github_response.links['next']['url']
             else:
                 another_page=False
 
-
         for page in orgs_repos:
-           for repo in page:
+            for repo in page:
+                last_update = get_last_update(repo)
+                repo['stale'] = "False"
+                if last_update:
+                    updated = last_update[0]
+                    if args.days:
+                        if last_update[1] > args.days:
+                            repo['stale'] = "True"
+                else:
+                    updated = "NotAvailable"
 
-              last_update = get_last_update(repo)
-              stale_repo_days = (datetime.now(timezone.utc) - last_update.replace(tzinfo=timezone.utc)).days
+                # Truncate if description is too long
+                if repo['description']:
+                    repo['description'] = (repo['description'][:80] + '..') if len(repo['description']) > 80 else repo['description']
+                else:
+                    repo['description'] = ""
 
-              repo['stale'] = "False"
+                # Actions for stale repos
+                main_contributor = ""
+                if repo['stale'] == "True":
+                    main_contributor = get_contrib(repo, headers)
 
-              if stale_repo_days > 365:
-                  repo['stale'] = "True"
+                repos.append(repo['name'] + '$' + repo['description'] + '$' + updated + "$" + main_contributor + "$" + repo['stale'])
 
-              if not repo['description']:
-                  repo['description'] = ""
-              else:
-                  repo['description'] = (repo['description'][:50] + '..') if len(repo['description']) > 50 else repo['description']
+    pt_headers = ["Repo", "Description", "LastPush", "MainContributor", "Stale"]
 
-              if args.contrib:
-                  try:
-                      api_url = api_baseurl + 'repos/' + repo["full_name"] + '/contributors'
-                      contrib = (requests.get(api_url, headers=headers)).json()
-                      # print(contrib[0]['login'])
-                      main_contributor = contrib[0]['login']
-                  except:
-                      main_contributor = "notfound"
-              else:
-                  main_contributor = ""
-
-
-              repos.append(repo['name'] + '$' + repo['description'] + '$' + last_update.strftime('%Y-%m-%d %H:%M') + "$" + main_contributor + "$" + repo['stale'])
-
-    arrHeaders = ["Repo", "Description", "LastPush", "MainContributor", "Stale"]
-
-    pt = PrettyTable(arrHeaders)
-    pt.align = "l"
+    pt_table = PrettyTable(pt_headers)
+    pt_table.align = "l"
 
     for repo_det in repos:
-        pt.add_row(repo_det.split("$"))
+        pt_table.add_row(repo_det.split("$"))
 
-    print(pt.get_string(sortby="LastPush"))
+    print(pt_table.get_string(sortby="LastPush"))
+
 
 def get_last_update(repo):
-    last_push = datetime.strptime(repo['pushed_at'], '%Y-%m-%dT%H:%M:%SZ')
-    last_commit = datetime.strptime(repo['updated_at'], '%Y-%m-%dT%H:%M:%SZ')
 
-    if last_push > last_commit:
-        return last_push
-    else:
-        return last_commit
+    """
+    From the repo object returned from an github API call
+    it returns a list with the latest update to the repo
+    and the number of days from it as an integer.
+    The date returned is the most recent evaluated between
+    the values pushed_at and updated_at
+    """
 
-if __name__ == '__main__': main()
+    try:
+        last_push = datetime.strptime(repo['pushed_at'], '%Y-%m-%dT%H:%M:%SZ')
+    except:
+        last_push = ""
+
+    try:
+        last_update = datetime.strptime(repo['updated_at'], '%Y-%m-%dT%H:%M:%SZ')
+    except:
+        last_update = ""
+
+    if last_push and last_update:
+
+        last_change = last_update
+
+        if last_push > last_update:
+            last_change = last_push
+
+        stale_repo_days = (datetime.now(timezone.utc) - last_change.replace(tzinfo=timezone.utc)).days
+
+        return [last_change.strftime('%Y-%m-%d %H:%M'), stale_repo_days]
+
+    return []
+
+
+def get_contrib(repo, headers):
+
+    """
+    From the repo object returned from an github API call
+    it returns the github username with the highest number
+    of updates to the repo.
+    """
+
+    params = {'per_page': 1}
+    
+    try:
+        api_url = "https://api.github.com/repos/" + repo["full_name"] + "/contributors"
+        contrib = (requests.get(api_url, params=params, headers=headers, timeout=10)).json()
+        return contrib[0]['login']
+    except:
+        return "notfound"
+
+
+if __name__ == '__main__':
+    main()
