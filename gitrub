@@ -11,14 +11,18 @@ from datetime import datetime, timezone
 import json
 import os
 import sys
+import shutil
+from subprocess import PIPE, Popen
 import requests
+import boto3
 from prettytable import PrettyTable
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-r", "--repo", help="Search for a specific repo name, list all repos if unset")
 parser.add_argument("-t", "--github-token", help="Github token required for authentication, set this or the environmental variable GH_TOKEN")
 parser.add_argument("-o", "--organization", help="User organization to elaborate")
-parser.add_argument("--delete", help="Backup and delete a repository - Basically clone and zip locally, then delete on GitHub")
+parser.add_argument("--archive", help="Backup a repository locally - Basically clone and zip, use --s3-bucket to upload to S3", action="store_true", default=False)
+parser.add_argument("--s3-bucket", help="S3 bucket to upload to while using the --archive option")
 parser.add_argument("-d", "--days", help="Set the number of days after of which a repo is considered 'stale'. Required to check old repos, if unset it won't fetch the repos' top contributor.", type=int)
 
 args = parser.parse_args()
@@ -50,7 +54,7 @@ def main():
     }
 
     api_baseurl = "https://api.github.com/"
-    
+
     # Check Github API rates before continuing
     rates = (requests.get(api_baseurl + "rate_limit", headers=headers, timeout=10)).json()
     try:
@@ -81,26 +85,30 @@ def main():
             if repo["message"] == "Not Found":
                 print("Repository not found, please check if it actually exists")
         else:
-            repo['stale'] = "False"
-
             last_update = get_last_update(repo)
             updated = ""
+            repo['description'] = ""
             repo['stale'] = "False"
+            main_contributor = ""
+
             if last_update:
-                if last_update[1] > args.days:
-                    repo['stale'] = "True"
                 updated = last_update[0]
+                if args.days:
+                    if last_update[1] > args.days:
+                        repo['stale'] = "True"
             else:
                 updated = "NotAvailable"
 
-            if not repo['description']:
-                repo['description'] = ""
-            else:
+            if repo['description']:
                 repo['description'] = (repo['description'][:50] + '..') if len(repo['description']) > 50 else repo['description']
 
-            main_contributor = ""
             if args.days:
                 main_contributor = get_contrib(repo, headers)
+
+            if args.archive:
+                git_archive(repo, github_token, args.s3_bucket)
+
+            exit()
 
             repos.append(repo['name'] + '$' + repo['description'] + '$' + updated + "$" + main_contributor + "$" + repo['stale'])
     else:
@@ -175,12 +183,12 @@ def get_last_update(repo):
     try:
         last_push = datetime.strptime(repo['pushed_at'], '%Y-%m-%dT%H:%M:%SZ')
     except:
-        last_push = ""
+        last_push = None
 
     try:
         last_update = datetime.strptime(repo['updated_at'], '%Y-%m-%dT%H:%M:%SZ')
     except:
-        last_update = ""
+        last_update = None
 
     if last_push and last_update:
 
@@ -193,7 +201,7 @@ def get_last_update(repo):
 
         return [last_change.strftime('%Y-%m-%d %H:%M'), stale_repo_days]
 
-    return []
+    return ["-", None]
 
 
 def get_contrib(repo, headers):
@@ -205,13 +213,38 @@ def get_contrib(repo, headers):
     """
 
     params = {'per_page': 1}
-    
+
     try:
         api_url = "https://api.github.com/repos/" + repo["full_name"] + "/contributors"
         contrib = (requests.get(api_url, params=params, headers=headers, timeout=10)).json()
         return contrib[0]['login']
     except:
         return "notfound"
+
+
+def git_archive(repo, github_token, destination_bucket):
+
+    """
+    Clone a git repo, zip it and delete the clone folder
+    """
+
+    # Set the URL to use the GitHub token to clone
+    repo_url = repo["clone_url"].replace("https://", f"https://{github_token}@")
+
+    # Clone the repo into a folder with the same name
+    with Popen("git clone " + repo_url + " " + repo["name"], stdout=PIPE, stderr=PIPE, shell=True) as process:
+        process.communicate()[0].decode("utf-8")
+
+    # ZIP the whole folder (zipfile, 'zip', folder_to_archive)
+    shutil.make_archive(repo["name"], 'zip', repo["name"])
+
+    if destination_bucket:
+        # Upload the zip file on S3
+        s3_res = boto3.resource('s3')
+        s3_res.Bucket(destination_bucket).upload_file(f"{repo['name']}.zip", f"github_backup/{repo['name']}.zip")
+
+    # Delete the zip file and the cloned directory
+    shutil.rmtree(repo["name"])
 
 
 if __name__ == '__main__':
